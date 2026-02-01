@@ -1,3 +1,8 @@
 export default function App() {
-  return <h1>HELLO DARI APP</h1>
+  return (
+    <div style={{ padding: 40 }}>
+      <h1>APP JALAN</h1>
+      <p>Kalau ini muncul, React sudah beres.</p>
+    </div>
+  )
 }
