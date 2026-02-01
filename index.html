@@ -1,13 +1,497 @@
-<!DOCTYPE html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Microstock Genius</title>
-  </head>
-  <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.jsx"></script>
-  </body>
-</html>
+import React, { useState, useRef, useEffect } from 'react';
+import { Upload, X, FileVideo, Image as ImageIcon, Download, Sparkles, Settings2, AlertCircle, CheckCircle2, FileText, Code2, RefreshCw, Lightbulb, Tag, Copy, ShieldCheck, Palette, AlertTriangle } from 'lucide-react';
+import { GoogleGenerativeAI } from "@google/generative-ai";
 
+// --- KONFIGURASI AI ---
+// Menggunakan string kosong untuk API Key sesuai instruksi environment
+const API_KEY = "AIzaSyAIaVIQrupSDGhQjeftHrT0cJq3Fdu62xw";
+
+const MicrostockGenius = () => {
+  // --- STATE MANAGEMENT ---
+  const [activeTab, setActiveTab] = useState('image'); // 'image' | 'video'
+  const [file, setFile] = useState(null);
+  const [previewUrl, setPreviewUrl] = useState(null);
+  const [isDragOver, setIsDragOver] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [generatedPrompts, setGeneratedPrompts] = useState([]);
+  const [error, setError] = useState('');
+  
+  // New State for Features
+  const [brainstormLoading, setBrainstormLoading] = useState(false);
+  const [brainstormIdeas, setBrainstormIdeas] = useState(null);
+  
+  const [metadataLoading, setMetadataLoading] = useState({}); // { [id]: boolean }
+  const [generatedMetadata, setGeneratedMetadata] = useState({}); // { [id]: { title, keywords } }
+
+  const [safetyLoading, setSafetyLoading] = useState(false);
+  const [safetyReport, setSafetyReport] = useState(null);
+
+  const [remixLoading, setRemixLoading] = useState({}); // { [id]: boolean }
+
+  // Settings State
+  const [settings, setSettings] = useState({
+    language: 'English', // 'English' | 'Bahasa Indonesia'
+    outputFormat: 'text', // 'text' | 'json'
+    count: 10
+  });
+
+  const videoRef = useRef(null);
+  const fileInputRef = useRef(null);
+
+  // --- HANDLERS ---
+
+  const handleFileChange = (selectedFile) => {
+    setError('');
+    setGeneratedPrompts([]);
+    setBrainstormIdeas(null);
+    setGeneratedMetadata({});
+    setSafetyReport(null);
+    
+    if (!selectedFile) return;
+
+    const validImageTypes = ['image/jpeg', 'image/png', 'image/jpg'];
+    const validVideoTypes = ['video/mp4', 'video/quicktime'];
+
+    if (activeTab === 'image') {
+      if (!validImageTypes.includes(selectedFile.type)) {
+        setError('Format gambar tidak didukung. Gunakan JPG atau PNG.');
+        return;
+      }
+    } else {
+      if (!validVideoTypes.includes(selectedFile.type)) {
+        setError('Format video tidak didukung. Gunakan MP4 atau MOV.');
+        return;
+      }
+    }
+
+    setFile(selectedFile);
+    const url = URL.createObjectURL(selectedFile);
+    setPreviewUrl(url);
+  };
+
+  const onDrop = (e) => {
+    e.preventDefault();
+    setIsDragOver(false);
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+      handleFileChange(e.dataTransfer.files[0]);
+    }
+  };
+
+  const clearAll = () => {
+    setFile(null);
+    setPreviewUrl(null);
+    setGeneratedPrompts([]);
+    setBrainstormIdeas(null);
+    setGeneratedMetadata({});
+    setSafetyReport(null);
+    setError('');
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  // --- AI GENERATION LOGIC ---
+
+  const fileToGenerativePart = async (file) => {
+    return new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onloadend = () => resolve(reader.result.split(',')[1]);
+      reader.readAsDataURL(file);
+    });
+  };
+
+  const captureVideoFrame = () => {
+    return new Promise((resolve, reject) => {
+      const video = videoRef.current;
+      if (!video) return reject("Video element not found");
+      
+      const canvas = document.createElement("canvas");
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      
+      const dataUrl = canvas.toDataURL("image/jpeg");
+      resolve(dataUrl.split(',')[1]);
+    });
+  };
+
+  const getModel = (jsonMode = true) => {
+    const genAI = new GoogleGenerativeAI(API_KEY);
+    return genAI.getGenerativeModel({ 
+      model: "gemini-2.5-flash-preview-09-2025",
+      generationConfig: {
+        responseMimeType: jsonMode ? "application/json" : "text/plain"
+      }
+    });
+  };
+
+  // 1. Core Feature: Generate Prompts
+  const generatePrompts = async () => {
+    if (!file) return;
+    setLoading(true);
+    setError('');
+
+    try {
+      const model = getModel(true);
+
+      let imagePart;
+      if (activeTab === 'image') {
+        const base64Data = await fileToGenerativePart(file);
+        imagePart = { inlineData: { data: base64Data, mimeType: file.type } };
+      } else {
+        const base64Data = await captureVideoFrame();
+        imagePart = { inlineData: { data: base64Data, mimeType: "image/jpeg" } };
+      }
+
+      const systemPrompt = `
+        You are an expert Microstock Photography & Videography Art Director.
+        Your task is to analyze the provided image/frame and generate ${settings.count} unique, high-quality, commercial-ready prompts for AI generators (like Midjourney, Stable Diffusion, Flux).
+
+        **STRICT RULES FOR MICROSTOCK SAFETY:**
+        1. NO trademarked names, brands, logos, or specific protected designs.
+        2. NO names of real famous people/celebrities.
+        3. Focus on generic, commercial, high-quality descriptions.
+
+        **PROMPT VARIATION RULES:**
+        - Generate exactly ${settings.count} prompts.
+        - Language: ${settings.language}.
+        - Ensure structural variety.
+
+        **JSON OUTPUT FORMAT:**
+        Return a JSON object with a key "prompts" which is an array of objects:
+        { "id": number, "full_prompt": string, "details": { "subject": string, "mood": string, "style": string } }
+      `;
+
+      const result = await model.generateContent([systemPrompt, imagePart]);
+      const parsedData = JSON.parse(result.response.text());
+      setGeneratedPrompts(parsedData.prompts || []);
+
+    } catch (err) {
+      console.error(err);
+      setError('Gagal menghasilkan prompt. Pastikan koneksi stabil atau coba gambar lain.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // 2. Feature: Generate Metadata (Title & Keywords)
+  const generateMetadata = async (promptId, promptText) => {
+    setMetadataLoading(prev => ({ ...prev, [promptId]: true }));
+    try {
+      const model = getModel(true);
+      const prompt = `
+        You are a Microstock SEO Expert.
+        Based on this image prompt: "${promptText}", generate metadata optimized for Adobe Stock and Shutterstock.
+        
+        Output JSON format:
+        {
+          "title": "A commercial, descriptive title (max 70 chars)",
+          "keywords": "50 comma-separated keywords, ranked by relevance, include conceptual keywords"
+        }
+      `;
+      
+      const result = await model.generateContent(prompt);
+      const data = JSON.parse(result.response.text());
+      setGeneratedMetadata(prev => ({ ...prev, [promptId]: data }));
+    } catch (err) {
+      console.error("Metadata generation failed", err);
+    } finally {
+      setMetadataLoading(prev => ({ ...prev, [promptId]: false }));
+    }
+  };
+
+  // 3. Feature: Brainstorm Concepts
+  const generateBrainstormIdeas = async () => {
+    if (!file) return;
+    setBrainstormLoading(true);
+    
+    try {
+      const model = getModel(true);
+      let imagePart;
+      if (activeTab === 'image') {
+        const base64Data = await fileToGenerativePart(file);
+        imagePart = { inlineData: { data: base64Data, mimeType: file.type } };
+      } else {
+        const base64Data = await captureVideoFrame();
+        imagePart = { inlineData: { data: base64Data, mimeType: "image/jpeg" } };
+      }
+
+      const prompt = `
+        Analyze this image. Suggest 3 alternative commercial concepts/angles involving this subject but with DIFFERENT settings or moods that would sell well on microstock.
+        Output JSON: { "ideas": [{ "title": "Concept Title", "description": "Short explanation" }] }
+      `;
+
+      const result = await model.generateContent([prompt, imagePart]);
+      const data = JSON.parse(result.response.text());
+      setBrainstormIdeas(data.ideas);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setBrainstormLoading(false);
+    }
+  };
+
+  // 4. Feature: Safety Audit (Pemeriksaan Keamanan Microstock)
+  const analyzeSafety = async () => {
+    if (!file) return;
+    setSafetyLoading(true);
+    setSafetyReport(null);
+
+    try {
+      const model = getModel(true);
+      let imagePart;
+      if (activeTab === 'image') {
+        const base64Data = await fileToGenerativePart(file);
+        imagePart = { inlineData: { data: base64Data, mimeType: file.type } };
+      } else {
+        const base64Data = await captureVideoFrame();
+        imagePart = { inlineData: { data: base64Data, mimeType: "image/jpeg" } };
+      }
+
+      const prompt = `
+        Analyze this image strictly for Microstock Submission risks.
+        Look for:
+        1. Visible Trademarks/Logos (even small ones).
+        2. Recognizable Faces (implied model release need).
+        3. Copyrighted Designs (tattoos, artwork, gadgets).
+        4. Technical Quality Estimates (Noise, Blur).
+
+        Output JSON:
+        {
+          "status": "SAFE" or "CAUTION" or "RISKY",
+          "reasons": ["List of specific potential rejection reasons"],
+          "model_release_needed": boolean,
+          "property_release_needed": boolean
+        }
+      `;
+
+      const result = await model.generateContent([prompt, imagePart]);
+      const data = JSON.parse(result.response.text());
+      setSafetyReport(data);
+    } catch (err) {
+      console.error("Safety check failed", err);
+    } finally {
+      setSafetyLoading(false);
+    }
+  };
+
+  // 5. Feature: Style Remix (Ubah Gaya Prompt)
+  const remixPrompt = async (id, currentPrompt, style) => {
+    setRemixLoading(prev => ({ ...prev, [id]: true }));
+    try {
+      const model = getModel(true);
+      const prompt = `
+        Rewrite the following image prompt to have a "${style}" visual style.
+        Keep the main subject but change the lighting, mood, and camera description to fit the style.
+        Language: ${settings.language}.
+        
+        Original Prompt: "${currentPrompt}"
+        
+        Output JSON: { "remixed_prompt": "The new prompt text..." }
+      `;
+
+      const result = await model.generateContent(prompt);
+      const data = JSON.parse(result.response.text());
+      
+      setGeneratedPrompts(prev => prev.map(p => 
+        p.id === id ? { 
+          ...p, 
+          full_prompt: data.remixed_prompt, 
+          details: { ...p.details, style: style } 
+        } : p
+      ));
+
+    } catch (err) {
+      console.error("Remix failed", err);
+    } finally {
+      setRemixLoading(prev => ({ ...prev, [id]: false }));
+    }
+  };
+
+  // --- EXPORT LOGIC ---
+  const downloadCSV = () => {
+    if (generatedPrompts.length === 0) return;
+    let csvContent = "data:text/csv;charset=utf-8,";
+
+    if (settings.outputFormat === 'json') {
+      csvContent += "No,JSON Data\n";
+      generatedPrompts.forEach((item) => {
+        const jsonString = JSON.stringify(item).replace(/"/g, '""'); 
+        csvContent += `${item.id},"${jsonString}"\n`;
+      });
+    } else {
+      csvContent += "No,Prompt\n";
+      generatedPrompts.forEach((item) => {
+        const cleanPrompt = item.full_prompt.replace(/"/g, '""');
+        csvContent += `${item.id},"${cleanPrompt}"\n`;
+      });
+    }
+
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement("a");
+    link.setAttribute("href", encodedUri);
+    link.setAttribute("download", `microstock_prompts_${Date.now()}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-950 text-gray-100 font-sans selection:bg-purple-500/30 p-4 md:p-8 flex items-center justify-center relative overflow-hidden">
+      
+      {/* Background Ambience */}
+      <div className="fixed top-[-20%] left-[-10%] w-[500px] h-[500px] bg-purple-600/20 rounded-full blur-[120px] pointer-events-none" />
+      <div className="fixed bottom-[-20%] right-[-10%] w-[600px] h-[600px] bg-pink-600/10 rounded-full blur-[120px] pointer-events-none" />
+
+      {/* Main Card */}
+      <div className="w-full max-w-4xl bg-black/40 backdrop-blur-xl border border-purple-500/20 rounded-3xl shadow-[0_0_50px_rgba(168,85,247,0.15)] p-6 md:p-8 relative z-10 flex flex-col md:flex-row gap-8">
+        
+        {/* LEFT COLUMN: Input & Preview */}
+        <div className="flex-1 flex flex-col gap-6">
+          
+          {/* Header */}
+          <div>
+            <h1 className="text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-purple-400 to-pink-400">
+              MicrostockGenius
+            </h1>
+            <p className="text-gray-400 text-sm mt-1">AI-Powered Prompt Generator for Contributors</p>
+          </div>
+
+          {/* Tabs */}
+          <div className="flex bg-slate-900/80 p-1 rounded-xl border border-white/5">
+            <button
+              onClick={() => { setActiveTab('image'); clearAll(); }}
+              className={`flex-1 flex items-center justify-center gap-2 py-2.5 rounded-lg text-sm font-medium transition-all ${
+                activeTab === 'image' 
+                  ? 'bg-purple-600/20 text-purple-300 shadow-sm border border-purple-500/30' 
+                  : 'text-gray-400 hover:text-gray-200 hover:bg-white/5'
+              }`}
+            >
+              <ImageIcon className="w-4 h-4" />
+              Image
+            </button>
+            <button
+              onClick={() => { setActiveTab('video'); clearAll(); }}
+              className={`flex-1 flex items-center justify-center gap-2 py-2.5 rounded-lg text-sm font-medium transition-all ${
+                activeTab === 'video' 
+                  ? 'bg-purple-600/20 text-purple-300 shadow-sm border border-purple-500/30' 
+                  : 'text-gray-400 hover:text-gray-200 hover:bg-white/5'
+              }`}
+            >
+              <FileVideo className="w-4 h-4" />
+              Video
+            </button>
+          </div>
+
+          {/* Upload / Preview Area */}
+          <div 
+            className={`relative flex flex-col items-center justify-center min-h-[300px] rounded-2xl border-2 transition-all overflow-hidden bg-slate-900/40 group ${
+              isDragOver ? 'border-purple-500 bg-purple-500/10' : 'border-dashed border-gray-700 hover:border-gray-500'
+            }`}
+            onDragOver={(e) => { e.preventDefault(); setIsDragOver(true); }}
+            onDragLeave={() => setIsDragOver(false)}
+            onDrop={onDrop}
+          >
+            {previewUrl ? (
+              <div className="w-full h-full relative flex flex-col items-center justify-center p-2">
+                {activeTab === 'image' ? (
+                  <img src={previewUrl} alt="Preview" className="max-h-[280px] w-auto rounded-lg shadow-lg object-contain" />
+                ) : (
+                  <video 
+                    ref={videoRef}
+                    src={previewUrl} 
+                    controls 
+                    className="max-h-[280px] w-auto rounded-lg shadow-lg"
+                    crossOrigin="anonymous" 
+                  />
+                )}
+                
+                <button 
+                  onClick={clearAll}
+                  className="absolute top-4 right-4 p-2 bg-red-500/20 text-red-400 rounded-full hover:bg-red-500 hover:text-white transition-all backdrop-blur-md"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            ) : (
+              <div className="text-center p-8 pointer-events-none">
+                <div className={`w-16 h-16 rounded-2xl bg-gradient-to-tr from-purple-500/20 to-pink-500/20 flex items-center justify-center mx-auto mb-4 border border-white/5 shadow-inner`}>
+                  <Upload className="w-8 h-8 text-purple-400" />
+                </div>
+                <h3 className="text-gray-200 font-medium mb-1">
+                  Drag & Drop {activeTab === 'image' ? 'Image' : 'Video'}
+                </h3>
+                <p className="text-gray-500 text-xs mb-4">
+                  {activeTab === 'image' ? 'JPG, PNG supported' : 'MP4, MOV supported'}
+                </p>
+                <button 
+                  onClick={() => fileInputRef.current.click()}
+                  className="pointer-events-auto px-6 py-2 bg-white/5 hover:bg-white/10 text-white text-sm rounded-full border border-white/10 transition-colors"
+                >
+                  Browse Files
+                </button>
+              </div>
+            )}
+            <input 
+              type="file" 
+              ref={fileInputRef}
+              className="hidden"
+              onChange={(e) => handleFileChange(e.target.files[0])}
+              accept={activeTab === 'image' ? "image/*" : "video/mp4,video/quicktime"}
+            />
+          </div>
+          
+          {/* FEATURE BUTTONS GROUP */}
+          {file && !loading && (
+             <div className="grid grid-cols-2 gap-2 mt-2 animate-in fade-in slide-in-from-top-2">
+                <button 
+                  onClick={generateBrainstormIdeas}
+                  disabled={brainstormLoading}
+                  className="py-2.5 bg-slate-800 hover:bg-slate-700 text-purple-300 text-xs font-medium rounded-xl border border-purple-500/20 flex items-center justify-center gap-2 transition-all"
+                >
+                  {brainstormLoading ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Lightbulb className="w-3 h-3" />}
+                  Ide Konsep
+                </button>
+
+                <button 
+                  onClick={analyzeSafety}
+                  disabled={safetyLoading}
+                  className="py-2.5 bg-slate-800 hover:bg-slate-700 text-blue-300 text-xs font-medium rounded-xl border border-blue-500/20 flex items-center justify-center gap-2 transition-all"
+                >
+                  {safetyLoading ? <RefreshCw className="w-3 h-3 animate-spin" /> : <ShieldCheck className="w-3 h-3" />}
+                  Cek Keamanan
+                </button>
+             </div>
+          )}
+
+          {/* FEATURE RESULTS */}
+          {brainstormIdeas && (
+             <div className="mt-2 bg-purple-900/20 border border-purple-500/30 rounded-xl p-4 animate-in fade-in">
+                <div className="flex items-center justify-between mb-2">
+                   <h4 className="text-sm font-semibold text-purple-300 flex items-center gap-2">
+                     <Sparkles className="w-3 h-3" /> Ide Konsep Alternatif
+                   </h4>
+                   <button onClick={() => setBrainstormIdeas(null)}><X className="w-3 h-3 text-gray-400"/></button>
+                </div>
+                <div className="space-y-2">
+                  {brainstormIdeas.map((idea, idx) => (
+                    <div key={idx} className="bg-black/30 p-2 rounded text-xs text-gray-300 border border-white/5">
+                      <strong className="text-purple-200 block mb-1">{idea.title}</strong>
+                      {idea.description}
+                    </div>
+                  ))}
+                </div>
+             </div>
+          )}
+
+          {safetyReport && (
+            <div className={`mt-2 border rounded-xl p-4 animate-in fade-in ${
+              safetyReport.status === 'SAFE' ? 'bg-green-900/20 border-green-500/30' : 'bg-orange-900/20 border-orange-500/30'
+            }`}>
+               <div className="flex items-center justify-between mb-2">
+                  <h4 className={`text-sm font-bold flex items-center gap-2 ${
+                    safetyReport.status === 'SAFE' ? 'text-green-400' : 'text-orange-400'
+                  }`}>
+                    {safetyReport.status === 'SAFE' ? <CheckCircle2 className="w-4 h-4"/> : <AlertTriangle className="w-4 h-4"/>}
+                    {safetyReport.status === 'SAFE' ? 'Aman untuk Microstock' : 'Perlu Perhatian (Caution)'}
+                  </h4>
+                  <button onClick={() => 
